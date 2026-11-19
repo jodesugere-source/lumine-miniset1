@@ -143,7 +143,7 @@ async function getMysteryConfig() {
 }
 
 async function saveMysteryConfig(cfg) {
-  await redisCommand(["SET", REDIS_MYSTERY_KEY, JSON.stringify(cfg)]);
+    await redisCommand(["SET", REDIS_MYSTERY_KEY, JSON.stringify(cfg)]);
 }
 
 async function getVouchers() {
@@ -239,8 +239,9 @@ function extractNominalFromNotif(text) {
     if (!isNaN(num) && num >= 100) return num;
   }
   return null;
-  }
-  function parseNominal(hargaStr) {
+}
+
+function parseNominal(hargaStr) {
   const angka = parseInt(String(hargaStr || "").replace(/\D/g, ""), 10);
   return angka && angka >= 100 ? angka : 2000;
 }
@@ -286,8 +287,7 @@ function getWibTimestamp() {
   const hh = String(wib.getUTCHours()).padStart(2, "0");
   const min = String(wib.getUTCMinutes()).padStart(2, "0");
   return `${dd}/${mm}/${yyyy} • ${hh}:${min} WIB`;
-}
-
+    }
 // ==========================================
 // 3. SISTEM LEADERBOARD, TIER & TESTIMONI CH (WIB / UTC+7)
 // ==========================================
@@ -445,10 +445,8 @@ async function createOrder(user, itemNama, baseNominal, targetLink, isMystery = 
       await clearActiveUserVoucher(user.id);
     }
   }
-
   const finalBaseNominal = Math.max(500, baseNominal - discount);
 
-  // Cari kode unik (+1 s/d +299) yang nominal totalnya belum dipakai order aktif
   let kodeUnik = ((orderId - 1) % 299) + 1;
   for (let offset = 0; offset < 299; offset++) {
     const candidateCode = (((orderId - 1) + offset) % 299) + 1;
@@ -645,8 +643,8 @@ async function processApproveOrder(token, order, sourceLabel = "Manual Admin") {
   });
 
   return { deliveredName, deliveredLink, sourceLabel };
-}
-function getCompactReplyKeyboard() {
+      }
+    function getCompactReplyKeyboard() {
   return {
     keyboard: [
       [{ text: "🛍️ Katalog" }, { text: "🔥 Bestseller" }],
@@ -847,7 +845,7 @@ async function sendMysteryMenu(token, chatId) {
   }
 
   let prizePreview = `• Salah satu dari <b>${katalogList.length} Koleksi Mini Set</b> (nilai s/d Rp 3.000)\n`;
-  if (bundle.link && bundle.link.trim() !== "") {
+         if (bundle.link && bundle.link.trim() !== "") {
     prizePreview += "• 🌟 <b>GRAND JACKPOT:</b> Promo Bundling 2 Mini Set (nilai Rp 5.000)!\n";
   }
 
@@ -1033,7 +1031,6 @@ async function sendChannelLainnya(token, chatId) {
     reply_markup: { inline_keyboard: rows },
   });
 }
-
 // ==========================================
 // 5. HANDLER UTAMA SERVERLESS VERCEL
 // ==========================================
@@ -1069,7 +1066,6 @@ module.exports = async function handler(req, res) {
   try {
     const update =
       typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-
     // ------------------------------------------
     // ENDPOINT AUTO-ACC MACRODROID (?autoacc=lumine2026)
     // ------------------------------------------
@@ -1136,8 +1132,506 @@ module.exports = async function handler(req, res) {
         orderId: order.id,
         amount,
       });
+        }
+        // ------------------------------------------
+    // 0. HANDLER POSTINGAN CHANNEL (/settesti LANGSUNG DI CH)
+    // ------------------------------------------
+    if (update.channel_post) {
+      const post = update.channel_post;
+      const postText = (post.text || "").trim();
+      if (postText.startsWith("/settesti")) {
+        const me = await tgRequest(token, "getMe", {});
+        const botUsername = (me && me.result && me.result.username) || "";
+        const chTitle = post.chat.title || "Channel Testimoni";
+        const chUsername = post.chat.username || "";
+
+        await saveTestiConfig({
+          channel_id: post.chat.id,
+          channel_title: chTitle,
+          channel_username: chUsername,
+          bot_username: botUsername,
+        });
+
+        await tgRequest(token, "deleteMessage", {
+          chat_id: post.chat.id,
+          message_id: post.message_id,
+        });
+
+        await tgRequest(token, "sendMessage", {
+          chat_id: post.chat.id,
+          text:
+            `✅ <b>Channel Testimoni Berhasil Terhubung!</b>\n` +
+            `Setiap pesanan yang di-ACC akan otomatis diposting di sini.`,
+          parse_mode: "HTML",
+        });
+
+        const qris = await getQris();
+        if (qris && qris.admin_chat_id) {
+          await tgRequest(token, "sendMessage", {
+            chat_id: qris.admin_chat_id,
+            text:
+              `✅ <b>Channel Testimoni Aktif!</b>\n` +
+              `• <b>Nama CH:</b> ${escapeHtml(chTitle)}\n` +
+              `• <b>ID CH:</b> <code>${post.chat.id}</code>`,
+            parse_mode: "HTML",
+          });
+        }
       }
-            // 0. ADMIN: /setsold (ATUR / RESET ANGKA TERJUAL BESTSELLER)
+      return res.status(200).json({ ok: true });
+    }
+
+    // ------------------------------------------
+    // A. HANDLER KLIK TOMBOL INLINE
+    // ------------------------------------------
+    if (update.callback_query) {
+      const call = update.callback_query;
+      const chatId = call.message.chat.id;
+      const messageId = call.message.message_id;
+      const data = call.data;
+      const callerId = call.from.id;
+      const callerUsername = (call.from && call.from.username) || "";
+      const isCallerAdmin =
+        callerUsername.toLowerCase() === ADMIN_USERNAME.toLowerCase();
+
+      await tgRequest(token, "answerCallbackQuery", {
+        callback_query_id: call.id,
+      });
+
+      // NAVIGASI MENU
+      if (data === "menu_home") {
+        await sendMainMenuCard(token, chatId);
+      } else if (data === "menu_katalog") {
+        await sendKatalogMenu(token, chatId);
+      } else if (data === "menu_bestseller") {
+        await sendBestsellerMenu(token, chatId);
+      } else if (data === "menu_mystery") {
+        await sendMysteryMenu(token, chatId);
+      } else if (data === "menu_koleksi") {
+        await sendKoleksiMenu(token, chatId, callerId);
+      } else if (data === "menu_promo") {
+        await sendPromoBundling(token, chatId);
+      } else if (data === "menu_cara") {
+        await sendCaraOrder(token, chatId);
+      } else if (data === "menu_upgrade") {
+        await sendUpgradeCh(token, chatId);
+      } else if (data === "menu_channel") {
+        await sendChannelLainnya(token, chatId);
+      } else if (data === "menu_voucher") {
+        const activeV = await getActiveUserVoucher(callerId);
+        await tgRequest(token, "sendMessage", {
+          chat_id: chatId,
+          text:
+            "🎟️ <b>KLAIM KODE VOUCHER DISKON</b>\n\n" +
+            (activeV
+              ? `✅ Voucher aktif siap pakai: <b>${escapeHtml(activeV.code)}</b> (Potongan <b>${formatRupiah(activeV.discount)}</b>)\n\n`
+              : "") +
+            "Ketik perintah berikut untuk memasang kode voucher sebelum checkout:\n" +
+            "<code>/voucher KODE_KAMU</code>\n\n" +
+            "<i>Contoh: <code>/voucher YT500</code></i>",
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [[{ text: "🔙 Menu Utama", callback_data: "menu_home" }]],
+          },
+        });
+      } else if (data === "menu_lb") {
+        const lb = await buildLeaderboardPayload("month", callerId);
+        await tgRequest(token, "sendMessage", {
+          chat_id: chatId,
+          text: lb.text,
+          parse_mode: "HTML",
+          reply_markup: lb.reply_markup,
+        });
+      } else if (data.startsWith("lb_")) {
+        const period = data.replace("lb_", "");
+        const lb = await buildLeaderboardPayload(period, callerId);
+        await tgRequest(token, "editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: lb.text,
+          parse_mode: "HTML",
+          reply_markup: lb.reply_markup,
+        });
+      }
+
+      // 1. LIHAT DETAIL SET
+      else if (data.startsWith("detail_")) {
+        const katalogList = await getKatalog();
+        const itemId = data.replace("detail_", "");
+        const item = katalogList.find((k) => String(k.id) === itemId);
+
+        if (!item) {
+          await tgRequest(token, "sendMessage", {
+            chat_id: chatId,
+            text: "⚠️ Maaf, set ini sudah dihapus atau diperbarui oleh admin.",
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        const rankMap = getRankedKatalog(katalogList);
+        const rank = rankMap[String(item.id)];
+        const sold = Number(item.sold) || 0;
+        let popularityLine = "";
+        if (rank === 1) {
+          popularityLine = `│ • <b>Status :</b> 🔥 <b>#1 BESTSELLER</b> (${sold}x terjual)\n`;
+        } else if (rank === 2 || rank === 3) {
+          popularityLine = `│ • <b>Status :</b> ⭐ <b>#${rank} POPULER</b> (${sold}x terjual)\n`;
+        } else if (sold > 0) {
+          popularityLine = `│ • <b>Terjual :</b> ${sold}x pembelian\n`;
+        }
+
+        const activeV = await getActiveUserVoucher(callerId);
+        const voucherNote = activeV
+          ? `\n🎟️ <i>Voucher aktif: <b>${escapeHtml(activeV.code)}</b> (-${formatRupiah(activeV.discount)})</i>`
+          : "";
+
+        const captionText =
+          `✨ <b>${escapeHtml(item.nama)}</b>\n\n` +
+          `╭─── 📦 <b>DETAIL PAKET</b> ───\n` +
+          popularityLine +
+          `│ • <b>Isi :</b> ${escapeHtml(item.isi)}\n` +
+          `│ • <b>Harga :</b> <code>${escapeHtml(item.harga)}</code>\n` +
+          `╰────────────────────${voucherNote}\n\n` +
+          `💳 Klik tombol di bawah untuk memunculkan <b>QRIS + Kode Unik</b>!`;
+
+        const inlineMarkup = {
+          inline_keyboard: [
+            [
+              {
+                text: `💳 Beli Set Ini (${item.harga})`,
+                callback_data: `buy_${item.id}`,
+              },
+            ],
+            [
+              {
+                text: "🔙 Kembali ke Katalog",
+                callback_data: "menu_katalog",
+              },
+            ],
+          ],
+        };
+
+        if (item.photo_id) {
+          await tgRequest(token, "sendPhoto", {
+            chat_id: chatId,
+            photo: item.photo_id,
+            caption: captionText,
+            parse_mode: "HTML",
+            reply_markup: inlineMarkup,
+          });
+        } else {
+          await tgRequest(token, "sendMessage", {
+            chat_id: chatId,
+            text: captionText,
+            parse_mode: "HTML",
+            reply_markup: inlineMarkup,
+          });
+        }
+      }
+
+      // 2. BUAT TAGIHAN QRIS + KODE UNIK (KATALOG / BUNDLING / MYSTERY BOX)
+      else if (data.startsWith("buy_")) {
+        const qris = await getQris();
+        if (!qris || !qris.file_id || !qris.admin_chat_id) {
+          await tgRequest(token, "sendMessage", {
+            chat_id: chatId,
+            text: `⚠️ Pembayaran QRIS sedang disiapkan admin. Silakan chat @${ADMIN_USERNAME} untuk order langsung.`,
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        let itemId = "";
+        let itemNama = "";
+        let baseNominal = 2000;
+        let targetLink = "";
+        let isMystery = false;
+
+        if (data === "buy_mystery") {
+          const cfg = await getMysteryConfig();
+          const katalogList = await getKatalog();
+          if (!cfg.enabled || katalogList.length === 0) {
+            await tgRequest(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ Mystery Box sedang tidak tersedia.",
+            });
+            return res.status(200).json({ ok: true });
+          }
+          itemNama = "🎲 Mystery Box Gacha Mini Set";
+          baseNominal = cfg.price || 2000;
+          targetLink = "MYSTERY_GACHA";
+          isMystery = true;
+        } else if (data === "buy_bundle") {
+          const bundle = await getBundle();
+          if (!bundle.link) {
+            await tgRequest(token, "sendMessage", {
+              chat_id: chatId,
+              text: `⚠️ Link promo bundling belum diatur. Silakan hubungi @${ADMIN_USERNAME}.`,
+            });
+            return res.status(200).json({ ok: true });
+          }
+          itemNama = "Promo Bundling 2 Mini Set";
+          baseNominal = 5000;
+          targetLink = bundle.link;
+        } else {
+          const katalogList = await getKatalog();
+          const rawId = data.replace("buy_", "");
+          const item = katalogList.find((k) => String(k.id) === rawId);
+          if (!item) {
+            await tgRequest(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ Paket tidak ditemukan atau sudah dihapus.",
+            });
+            return res.status(200).json({ ok: true });
+          }
+          itemId = String(item.id);
+          itemNama = item.nama;
+          baseNominal = parseNominal(item.harga);
+          targetLink = item.link;
+        }
+
+        const order = await createOrder(call.from, itemNama, baseNominal, targetLink, isMystery, itemId);
+
+        const discountLine =
+          order.discount > 0
+            ? `🎟️ <b>Voucher (${escapeHtml(order.voucher_code)}):</b> -${formatRupiah(order.discount)}\n`
+            : "";
+
+        const invoiceCaption =
+          `🧾 <b>INVOICE PESANAN #${order.id}</b>\n\n` +
+          `📦 <b>Paket:</b> ${escapeHtml(order.item_nama)}\n` +
+          `💵 <b>Harga Dasar:</b> ${formatRupiah(order.base_nominal)}\n` +
+          discountLine +
+          `🔢 <b>Kode Unik:</b> +${formatRupiah(order.kode_unik)}\n` +
+          `━━━━━━━━━━━━━━━━━━━━\n` +
+          `💰 <b>TOTAL TRANSFER: <code>${formatRupiah(order.total_nominal)}</code></b>\n` +
+          `━━━━━━━━━━━━━━━━━━━━\n\n` +
+          `⚠️ <b>PENTING:</b> Scan QRIS di atas dan transfer <b>TEPAT sampai digit terakhir</b> (<b>${formatRupiah(order.total_nominal)}</b>).\n\n` +
+          `⚡ <i>Link file akan otomatis dikirim dalam beberapa detik setelah transfer berhasil (atau klik Konfirmasi Pembayaran jika perlu bantuan admin).</i>`;
+
+        await tgRequest(token, "sendPhoto", {
+          chat_id: chatId,
+          photo: qris.file_id,
+          caption: invoiceCaption,
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "✅ Konfirmasi Pembayaran",
+                  callback_data: `confirm_${order.id}`,
+                },
+              ],
+              [
+                {
+                  text: "❌ Batalkan Pesanan",
+                  callback_data: `cancel_${order.id}`,
+                },
+              ],
+            ],
+          },
+        });
+      }
+
+      // 3. PEMBELI KLIK KONFIRMASI -> KIRIM NOTIF KE ADMIN
+      else if (data.startsWith("confirm_")) {
+        const orderId = data.replace("confirm_", "");
+        const order = await getOrder(orderId);
+
+        if (!order) {
+          await tgRequest(token, "sendMessage", {
+            chat_id: chatId,
+            text: "⚠️ Pesanan sudah kedaluwarsa. Silakan buat pesanan baru dari katalog.",
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        if (order.status === "acc") {
+          await tgRequest(token, "sendMessage", {
+            chat_id: chatId,
+            text: `✅ Pesanan #${order.id} sudah otomatis di-ACC! Cek pesan link di atas.`,
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        if (order.status !== "pending") {
+          return res.status(200).json({ ok: true });
+        }
+
+        order.status = "waiting_acc";
+        await saveOrder(orderId, order);
+
+        await tgRequest(token, "editMessageCaption", {
+          chat_id: chatId,
+          message_id: messageId,
+          caption:
+            `⏳ <b>MENUNGGU VERIFIKASI (Pesanan #${order.id})</b>\n\n` +
+            `📦 Paket: ${escapeHtml(order.item_nama)}\n` +
+            `💰 Nominal: <b>${formatRupiah(order.total_nominal)}</b>\n\n` +
+            `Konfirmasi kamu sudah tercatat. Link file akan otomatis dikirim ke chat ini segera setelah mutasi terverifikasi!`,
+          parse_mode: "HTML",
+        });
+
+        const qris = await getQris();
+        if (qris && qris.admin_chat_id) {
+          const voucherInfo =
+            order.discount > 0
+              ? `\n🎟️ <b>Voucher Dipakai:</b> ${escapeHtml(order.voucher_code)} (-${formatRupiah(order.discount)})`
+              : "";
+
+          const adminNotifText =
+            `🔔 <b>PESANAN MASUK #${order.id}</b>\n\n` +
+            `👤 <b>Pembeli:</b> ${escapeHtml(order.buyer_name)} (${escapeHtml(order.buyer_username)})\n` +
+            `📦 <b>Paket:</b> ${escapeHtml(order.item_nama)}${voucherInfo}\n` +
+            `💰 <b>Nominal Wajib Masuk:</b> <code>${formatRupiah(order.total_nominal)}</code>\n\n` +
+            `🔍 <i>Cek mutasi masuk sebesar <b>${formatRupiah(order.total_nominal)}</b> (atau tunggu Auto-ACC).</i>`;
+
+          await tgRequest(token, "sendMessage", {
+            chat_id: qris.admin_chat_id,
+            text: adminNotifText,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: `✅ ACC #${order.id} (Kirim Link)`,
+                    callback_data: `acc_${order.id}`,
+                  },
+                  {
+                    text: `❌ Tolak #${order.id}`,
+                    callback_data: `reject_${order.id}`,
+                  },
+                ],
+              ],
+            },
+          });
+        }
+      }
+
+      // 4. PEMBELI BATALKAN PESANAN
+      else if (data.startsWith("cancel_")) {
+        const orderId = data.replace("cancel_", "");
+        const order = await getOrder(orderId);
+        if (order && (order.status === "pending" || order.status === "waiting_acc")) {
+          order.status = "cancelled";
+          await Promise.all([
+            saveOrder(orderId, order),
+            redisCommand(["DEL", `${REDIS_NOMINAL_PREFIX}${order.total_nominal}`]),
+          ]);
+        }
+        await tgRequest(token, "editMessageCaption", {
+          chat_id: chatId,
+          message_id: messageId,
+          caption: `🚫 <b>Pesanan #${orderId} dibatalkan.</b>\nSilakan pilih kembali melalui menu Katalog Mini Set.`,
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [[{ text: "🛍️ Buka Katalog", callback_data: "menu_katalog" }]],
+          },
+        });
+      }
+
+      // 5. ADMIN KLIK ACC MANUAL -> PAKAI FUNGSI YANG SAMA DENGAN AUTO-ACC
+      else if (data.startsWith("acc_")) {
+        if (!isCallerAdmin) return res.status(200).json({ ok: true });
+        const orderId = data.replace("acc_", "");
+        const order = await getOrder(orderId);
+
+        if (!order || order.status === "acc") {
+          return res.status(200).json({ ok: true });
+        }
+
+        const { deliveredName } = await processApproveOrder(token, order, "Manual Admin");
+
+        const adminMysteryNote = order.is_mystery
+          ? `\n🎲 <b>Hadiah Gacha Didapat:</b> ${escapeHtml(deliveredName)}`
+          : "";
+
+        await tgRequest(token, "editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text:
+            `✅ <b>PESANAN #${order.id} SUDAH DI-ACC</b>\n` +
+            `👤 Pembeli: ${escapeHtml(order.buyer_name)} (${escapeHtml(order.buyer_username)})\n` +
+            `📦 Paket: ${escapeHtml(order.item_nama)}${adminMysteryNote}\n` +
+            `💰 Nominal: <b>${formatRupiah(order.total_nominal)}</b>\n` +
+            `🔥 <i>Link terkirim, Bestseller & Leaderboard terupdate!</i>`,
+          parse_mode: "HTML",
+        });
+      }
+
+      // 6. ADMIN KLIK TOLAK
+      else if (data.startsWith("reject_")) {
+        if (!isCallerAdmin) return res.status(200).json({ ok: true });
+        const orderId = data.replace("reject_", "");
+        const order = await getOrder(orderId);
+
+        if (!order || order.status === "rejected" || order.status === "acc") {
+          return res.status(200).json({ ok: true });
+        }
+
+        order.status = "rejected";
+        await Promise.all([
+          saveOrder(orderId, order),
+          redisCommand(["DEL", `${REDIS_NOMINAL_PREFIX}${order.total_nominal}`]),
+        ]);
+
+        await tgRequest(token, "sendMessage", {
+          chat_id: order.buyer_id,
+          text:
+            `❌ <b>PESANAN #${order.id} DITOLAK</b>\n\n` +
+            `Pembayaran sebesar <b>${formatRupiah(order.total_nominal)}</b> untuk paket <b>${escapeHtml(order.item_nama)}</b> tidak ditemukan di mutasi kami.\n\n` +
+            `Jika kamu sudah transfer sesuai kode unik, silakan kirim bukti transfer ke admin @${ADMIN_USERNAME}.`,
+          parse_mode: "HTML",
+        });
+
+        await tgRequest(token, "editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text:
+            `❌ <b>PESANAN #${order.id} DITOLAK (DANA TIDAK MASUK)</b>\n` +
+            `👤 Pembeli: ${escapeHtml(order.buyer_name)} (${escapeHtml(order.buyer_username)})\n` +
+            `💰 Nominal: ${formatRupiah(order.total_nominal)}`,
+          parse_mode: "HTML",
+        });
+      }
+
+      return res.status(200).json({ ok: true });
+    }
+
+    // ------------------------------------------
+    // B. HANDLER PESAN TEKS & FOTO DARI USER
+    // ------------------------------------------
+    if (update.message) {
+      const msg = update.message;
+      const chatId = msg.chat.id;
+      const senderId = msg.from && msg.from.id;
+      const senderUsername = (msg.from && msg.from.username) || "";
+      const isAdmin =
+        senderUsername.toLowerCase() === ADMIN_USERNAME.toLowerCase();
+
+      if (msg.chat && msg.chat.type === "private") {
+        await redisCommand(["SADD", REDIS_USERS_KEY, String(chatId)]);
+      }
+
+      const rawText = (msg.text || msg.caption || "").trim();
+      const lowerText = rawText.toLowerCase();
+
+      // ADMIN: /autoacc (CEK URL WEBHOOK MACRODROID)
+      if (rawText.startsWith("/autoacc")) {
+        if (!isAdmin) return res.status(200).json({ ok: true });
+        const host = req.headers["x-forwarded-host"] || req.headers.host;
+        const autoAccUrl = `https://${host}/api/webhook?autoacc=${AUTOACC_SECRET}`;
+        await tgRequest(token, "sendMessage", {
+          chat_id: chatId,
+          text:
+            "⚡ <b>KONFIGURASI AUTO-ACC MACRODROID</b>\n\n" +
+            `🔗 <b>URL Webhook (POST):</b>\n<code>${autoAccUrl}</code>\n\n` +
+            `📄 <b>Content-Type:</b> <code>application/json</code>\n` +
+            `📦 <b>Badan Konten:</b>\n<code>{"text": "[not_title] [notification]"}</code>`,
+          parse_mode: "HTML",
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // 0. ADMIN: /setsold (ATUR / RESET ANGKA TERJUAL BESTSELLER)
       if (rawText.startsWith("/setsold")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
         const katalogList = await getKatalog();
@@ -1180,8 +1674,7 @@ module.exports = async function handler(req, res) {
           parse_mode: "HTML",
         });
         return res.status(200).json({ ok: true });
-      }
-
+        }
       // 1. ADMIN: /settesti
       if (rawText.startsWith("/settesti")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
@@ -1243,8 +1736,7 @@ module.exports = async function handler(req, res) {
           });
         }
         return res.status(200).json({ ok: true });
-      }
-
+            }
       // 2. ADMIN: /broadcast
       if (rawText.startsWith("/broadcast")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
@@ -1401,8 +1893,7 @@ module.exports = async function handler(req, res) {
           });
         }
         return res.status(200).json({ ok: true });
-      }
-
+              }
       // 4. USER: /voucher KODE
       if (rawText.startsWith("/voucher")) {
         const code = rawText.replace(/^\/voucher\s*/i, "").trim().toUpperCase();
@@ -1463,8 +1954,9 @@ module.exports = async function handler(req, res) {
           },
         });
         return res.status(200).json({ ok: true });
-            }
-            // 5. ADMIN: /setmystery
+      }
+
+      // 5. ADMIN: /setmystery
       if (rawText.startsWith("/setmystery")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
         const arg = rawText.replace(/^\/setmystery\s*/i, "").trim().toLowerCase();
@@ -1513,8 +2005,7 @@ module.exports = async function handler(req, res) {
           parse_mode: "HTML",
         });
         return res.status(200).json({ ok: true });
-      }
-
+            }
       // 6. ADMIN: /resetlb
       if (rawText.startsWith("/resetlb")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
@@ -1598,9 +2089,8 @@ module.exports = async function handler(req, res) {
           });
         }
         return res.status(200).json({ ok: true });
-      }
-
-      // 9. ADMIN: /tambah
+            }
+       // 9. ADMIN: /tambah
       if (rawText.startsWith("/tambah")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
         const content = rawText.replace(/^\/tambah\s*/i, "").trim();
@@ -1695,8 +2185,7 @@ module.exports = async function handler(req, res) {
           parse_mode: "HTML",
         });
         return res.status(200).json({ ok: true });
-      }
-
+                             }
       // 11. ADMIN: /hapus
       if (rawText.startsWith("/hapus")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
@@ -1894,4 +2383,3 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 };
-          
