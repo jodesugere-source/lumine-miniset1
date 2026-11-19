@@ -1,9 +1,10 @@
 // ==========================================
-// 1. PENGATURAN UTAMA (BOT KEDUA — FULL FITUR + BESTSELLER)
+// 1. PENGATURAN UTAMA (BOT KEDUA — FULL FITUR + BESTSELLER + AUTO-ACC)
 // ==========================================
 const ADMIN_USERNAME = "Fellstore1"; // Tanpa tanda @
 const LINK_CH_CADANGAN = "https://t.me/+OGXaaPyrnd5kMmY1";
 const LINK_CH_FREE = "https://t.me/+jf3tLqLIG444MjBI";
+const AUTOACC_SECRET = process.env.AUTOACC_SECRET || "lumine2026";
 
 const REDIS_KEY = "test_lumine_miniset_katalog";
 const REDIS_BUNDLE_KEY = "test_lumine_miniset_bundle";
@@ -12,6 +13,7 @@ const REDIS_BANNER_KEY = "test_lumine_miniset_banner";
 const REDIS_TESTI_KEY = "test_lumine_miniset_testi";
 const REDIS_ORDER_SEQ_KEY = "test_lumine_miniset_order_seq";
 const REDIS_ORDER_PREFIX = "test_lumine_order_";
+const REDIS_NOMINAL_PREFIX = "test_lumine_nominal_";
 const REDIS_LB_PREFIX = "test_lumine_lb_";
 const REDIS_LB_NAMES_KEY = "test_lumine_lb_names";
 const REDIS_LB_ALLCNT_KEY = "test_lumine_lb_allcnt";
@@ -227,6 +229,17 @@ async function saveOrder(orderId, orderData) {
   ]);
 }
 
+function extractNominalFromNotif(text) {
+  if (!text || typeof text !== "string") return null;
+  const regex = /(?:rp|idr)\.?\s*([\d.,]+)/gi;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const clean = match[1].trim().replace(/[.,]00$/, "").replace(/[.,]/g, "");
+    const num = parseInt(clean, 10);
+    if (!isNaN(num) && num >= 100) return num;
+  }
+  return null;
+    }
 function parseNominal(hargaStr) {
   const angka = parseInt(String(hargaStr || "").replace(/\D/g, ""), 10);
   return angka && angka >= 100 ? angka : 2000;
@@ -421,7 +434,6 @@ async function buildLeaderboardPayload(period, viewerId) {
 
 async function createOrder(user, itemNama, baseNominal, targetLink, isMystery = false, itemId = "") {
   const orderId = await redisCommand(["INCR", REDIS_ORDER_SEQ_KEY]);
-  const kodeUnik = ((orderId - 1) % 299) + 1;
 
   let discount = 0;
   let voucherCode = "";
@@ -435,6 +447,19 @@ async function createOrder(user, itemNama, baseNominal, targetLink, isMystery = 
   }
 
   const finalBaseNominal = Math.max(500, baseNominal - discount);
+
+  // Cari kode unik (+1 s/d +299) yang nominal totalnya belum dipakai order aktif
+  let kodeUnik = ((orderId - 1) % 299) + 1;
+  for (let offset = 0; offset < 299; offset++) {
+    const candidateCode = (((orderId - 1) + offset) % 299) + 1;
+    const candidateTotal = finalBaseNominal + candidateCode;
+    const existingOrderId = await redisCommand(["GET", `${REDIS_NOMINAL_PREFIX}${candidateTotal}`]);
+    if (!existingOrderId) {
+      kodeUnik = candidateCode;
+      break;
+    }
+  }
+
   const totalNominal = finalBaseNominal + kodeUnik;
 
   const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "Pembeli";
@@ -456,11 +481,15 @@ async function createOrder(user, itemNama, baseNominal, targetLink, isMystery = 
     status: "pending",
   };
 
-  await saveOrder(orderId, orderData);
+  await Promise.all([
+    saveOrder(orderId, orderData),
+    redisCommand(["SET", `${REDIS_NOMINAL_PREFIX}${totalNominal}`, String(orderId), "EX", "7200"]),
+  ]);
   return orderData;
-  }
-  // ==========================================
-// 4. HELPER TELEGRAM API, TESTIMONI & TAMPILAN MENU
+}
+
+// ==========================================
+// 4. HELPER TELEGRAM API, TESTIMONI, AUTO-ACC & TAMPILAN MENU
 // ==========================================
 async function tgRequest(token, method, payload) {
   const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -523,6 +552,100 @@ function normalizeUrl(rawUrl) {
   return clean;
 }
 
+async function processApproveOrder(token, order, sourceLabel = "Manual Admin") {
+  order.status = "acc";
+  await Promise.all([
+    saveOrder(order.id, order),
+    redisCommand(["DEL", `${REDIS_NOMINAL_PREFIX}${order.total_nominal}`]),
+  ]);
+
+  if (order.voucher_code) {
+    const vouchers = await getVouchers();
+    const v = vouchers[order.voucher_code];
+    if (v && v.quota > 0) {
+      v.quota = Math.max(0, v.quota - 1);
+      if (!Array.isArray(v.used_by)) v.used_by = [];
+      if (!v.used_by.includes(String(order.buyer_id))) {
+        v.used_by.push(String(order.buyer_id));
+      }
+      vouchers[order.voucher_code] = v;
+      await saveVouchers(vouchers);
+    }
+  }
+
+  const katalogList = await getKatalog();
+  let deliveredName = order.item_nama;
+  let deliveredLink = order.target_link;
+  let soldItemId = order.item_id || "";
+  let buyerText = "";
+
+  if (order.is_mystery) {
+    const bundle = await getBundle();
+    const pool = katalogList.map((k) => ({ id: String(k.id), nama: k.nama, link: k.link }));
+    if (bundle.link && bundle.link.trim() !== "") {
+      pool.push({ id: "", nama: "🌟 JACKPOT: Promo Bundling 2 Mini Set", link: bundle.link });
+    }
+    const won =
+      pool.length > 0
+        ? pool[Math.floor(Math.random() * pool.length)]
+        : { id: "", nama: "Paket Spesial Lumine", link: `https://t.me/${ADMIN_USERNAME}` };
+
+    soldItemId = won.id;
+    deliveredName = won.nama;
+    deliveredLink = normalizeUrl(won.link);
+
+    buyerText =
+      `🎲 <b>MYSTERY BOX TERBUKA! (Pesanan #${order.id})</b> 🎲\n\n` +
+      `Selamat! Kamu mendapatkan hadiah:\n` +
+      `🎁 <b>${escapeHtml(deliveredName)}</b>\n\n` +
+      `Berikut link akses hadiah kamu:\n` +
+      `🔗 ${escapeHtml(deliveredLink)}\n\n` +
+      `<i>Hadiah tersimpan di 🎒 Koleksi Saya & poin masuk ke Leaderboard!</i>`;
+  } else {
+    deliveredLink = normalizeUrl(order.target_link);
+    buyerText =
+      `🎉 <b>PEMBAYARAN DI-ACC! (Pesanan #${order.id})</b>\n\n` +
+      `Terima kasih telah membeli <b>${escapeHtml(deliveredName)}</b>!\n` +
+      `Berikut link akses file kamu:\n` +
+      `🔗 ${escapeHtml(deliveredLink)}\n\n` +
+      `<i>Link tersimpan otomatis di 🎒 Koleksi Saya & poin masuk ke Leaderboard!</i>`;
+  }
+
+  if (soldItemId || deliveredName) {
+    const targetIdx = katalogList.findIndex(
+      (k) => (soldItemId && String(k.id) === String(soldItemId)) || k.nama === deliveredName
+    );
+    if (targetIdx !== -1) {
+      katalogList[targetIdx].sold = (Number(katalogList[targetIdx].sold) || 0) + 1;
+      await saveKatalog(katalogList);
+    }
+  }
+
+  await Promise.all([
+    recordPurchaseToLeaderboard(order),
+    addKoleksi(order.buyer_id, deliveredName, deliveredLink),
+  ]);
+
+  const updatedAllCnt = await redisCommand(["HGET", REDIS_LB_ALLCNT_KEY, String(order.buyer_id)]);
+  await sendTestimonialToChannel(token, order, deliveredName, updatedAllCnt);
+
+  await tgRequest(token, "sendMessage", {
+    chat_id: order.buyer_id,
+    text: buyerText,
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "📂 Buka Link File Sekarang", url: deliveredLink }],
+        [
+          { text: "🎒 Koleksi Saya", callback_data: "menu_koleksi" },
+          { text: "🏆 Leaderboard", callback_data: "menu_lb" },
+        ],
+      ],
+    },
+  });
+
+  return { deliveredName, deliveredLink, sourceLabel };
+      }
 function getCompactReplyKeyboard() {
   return {
     keyboard: [
@@ -732,7 +855,7 @@ async function sendMysteryMenu(token, chatId) {
     chat_id: chatId,
     text:
       "🎲 <b>MYSTERY BOX GACHA — LUMINE EDITION</b> 🎲\n\n" +
-      "Coba keberuntunganmu! Cukup bayar harga flat, dan setelah di-ACC admin bot akan otomatis mengacak hadiah untukmu:\n\n" +
+      "Coba keberuntunganmu! Cukup bayar harga flat, dan setelah pembayaran masuk bot akan otomatis mengacak hadiah untukmu:\n\n" +
       "╭─── 🎁 <b>DAFTAR HADIAH GACHA</b> ───\n" +
       prizePreview +
       "╰────────────────────────\n\n" +
@@ -817,7 +940,7 @@ async function sendPromoBundling(token, chatId, replyToMessageId = null) {
     "📌 <b>Cara Klaim Promo:</b>\n" +
     "1. Cek judul 2 set yang kamu mau di <b>Katalog Mini Set</b>.\n" +
     "2. Klik tombol <b>Beli Promo</b> di bawah untuk scan QRIS + kode unik.\n" +
-    "3. Setelah di-ACC admin, link akses langsung dikirim ke chat ini!";
+    "3. Setelah transfer sesuai nominal, link akses otomatis dikirim ke chat ini!";
 
   const buttons = [];
   if (bundle.link && bundle.link.trim() !== "") {
@@ -853,9 +976,9 @@ async function sendCaraOrder(token, chatId) {
       "2️⃣ <b>Pakai Kode Voucher (Opsional)</b>\n" +
       "Jika dapat kode promo dari YouTube/TikTok, ketik <code>/voucher KODE</code> sebelum klik tombol beli.\n\n" +
       "3️⃣ <b>Scan QRIS + Kode Unik</b>\n" +
-      "Wajib transfer sesuai nominal persis sampai digit terakhir agar pesanan terdeteksi.\n\n" +
-      "4️⃣ <b>Konfirmasi & Terima File</b>\n" +
-      "Klik <b>✅ Konfirmasi Pembayaran</b>. Setelah di-ACC admin, link file dikirim otomatis & tersimpan di <b>🎒 Koleksi Saya</b>.",
+      "Wajib transfer sesuai nominal persis sampai digit terakhir agar sistem otomatis mendeteksi pembayaranmu.\n\n" +
+      "4️⃣ <b>Terima File Otomatis</b>\n" +
+      "Dalam hitungan detik setelah transfer berhasil, link file otomatis dikirim & tersimpan di <b>🎒 Koleksi Saya</b>.",
     parse_mode: "HTML",
     reply_markup: {
       inline_keyboard: [
@@ -922,12 +1045,13 @@ module.exports = async function handler(req, res) {
   }
 
   if (req.method === "GET") {
-    if (req.query.setup === "true") {
+    if (req.query.setup === "true" || req.query.setwebhook === "1") {
       const webhookUrl = `https://${req.headers.host}/api/webhook`;
       const result = await tgRequest(token, "setWebhook", { url: webhookUrl });
       return res.status(200).json({
         status: "Webhook berhasil diatur",
         webhook_url: webhookUrl,
+        autoacc_url: `https://${req.headers.host}/api/webhook?autoacc=${AUTOACC_SECRET}`,
         database_connected: Boolean(
           (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
             (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN)
@@ -935,7 +1059,7 @@ module.exports = async function handler(req, res) {
         telegram_response: result,
       });
     }
-    return res.status(200).send("Bot Lumine Photopack | Mini Set 1 Aktif!");
+    return res.status(200).send("Bot Lumine Photopack | Mini Set 1 + Auto-ACC Aktif!");
   }
 
   if (req.method !== "POST") {
@@ -947,6 +1071,73 @@ module.exports = async function handler(req, res) {
       typeof req.body === "string" ? JSON.parse(req.body) : req.body;
 
     // ------------------------------------------
+    // ENDPOINT AUTO-ACC MACRODROID (?autoacc=lumine2026)
+    // ------------------------------------------
+    if (req.query && req.query.autoacc !== undefined) {
+      if (req.query.autoacc !== AUTOACC_SECRET) {
+        return res.status(401).json({ ok: false, error: "Secret autoacc salah" });
+      }
+
+      const notifText = (update && (update.text || update.notification)) || "";
+      const amount = extractNominalFromNotif(notifText);
+
+      if (!amount) {
+        return res.status(200).json({
+          ok: true,
+          matched: false,
+          reason: "Nominal Rp tidak ditemukan di notifikasi",
+          received: notifText,
+        });
+      }
+
+      const orderId = await redisCommand(["GET", `${REDIS_NOMINAL_PREFIX}${amount}`]);
+      if (!orderId) {
+        return res.status(200).json({
+          ok: true,
+          matched: false,
+          amount,
+          reason: "Tidak ada pesanan aktif dengan nominal tersebut",
+        });
+      }
+
+      const order = await getOrder(orderId);
+      if (!order || order.status === "acc" || order.status === "cancelled" || order.status === "rejected") {
+        await redisCommand(["DEL", `${REDIS_NOMINAL_PREFIX}${amount}`]);
+        return res.status(200).json({
+          ok: true,
+          matched: false,
+          amount,
+          reason: "Pesanan sudah diproses atau dibatalkan",
+        });
+      }
+
+      const { deliveredName } = await processApproveOrder(token, order, "Auto-ACC MacroDroid");
+
+      const qris = await getQris();
+      if (qris && qris.admin_chat_id) {
+        const adminMysteryNote = order.is_mystery
+          ? `\n🎲 <b>Hadiah Gacha Didapat:</b> ${escapeHtml(deliveredName)}`
+          : "";
+        await tgRequest(token, "sendMessage", {
+          chat_id: qris.admin_chat_id,
+          text:
+            `⚡ <b>AUTO-ACC QRIS BERHASIL (#${order.id})</b>\n` +
+            `👤 Pembeli: ${escapeHtml(order.buyer_name)} (${escapeHtml(order.buyer_username)})\n` +
+            `📦 Paket: ${escapeHtml(order.item_nama)}${adminMysteryNote}\n` +
+            `💰 Mutasi Masuk: <b>${formatRupiah(order.total_nominal)}</b>\n` +
+            `🔥 <i>Link terkirim otomatis, Bestseller & Leaderboard terupdate!</i>`,
+          parse_mode: "HTML",
+        });
+      }
+
+      return res.status(200).json({
+        ok: true,
+        matched: true,
+        orderId: order.id,
+        amount,
+      });
+        }
+            // ------------------------------------------
     // 0. HANDLER POSTINGAN CHANNEL (/settesti LANGSUNG DI CH)
     // ------------------------------------------
     if (update.channel_post) {
@@ -974,7 +1165,7 @@ module.exports = async function handler(req, res) {
           chat_id: post.chat.id,
           text:
             `✅ <b>Channel Testimoni Berhasil Terhubung!</b>\n` +
-            `Setiap pesanan yang di-ACC admin akan otomatis diposting di sini.`,
+            `Setiap pesanan yang di-ACC akan otomatis diposting di sini.`,
           parse_mode: "HTML",
         });
 
@@ -1039,7 +1230,7 @@ module.exports = async function handler(req, res) {
               ? `✅ Voucher aktif siap pakai: <b>${escapeHtml(activeV.code)}</b> (Potongan <b>${formatRupiah(activeV.discount)}</b>)\n\n`
               : "") +
             "Ketik perintah berikut untuk memasang kode voucher sebelum checkout:\n" +
-                        "<code>/voucher KODE_KAMU</code>\n\n" +
+            "<code>/voucher KODE_KAMU</code>\n\n" +
             "<i>Contoh: <code>/voucher YT500</code></i>",
           parse_mode: "HTML",
           reply_markup: {
@@ -1139,7 +1330,8 @@ module.exports = async function handler(req, res) {
             reply_markup: inlineMarkup,
           });
         }
-}
+      }
+
       // 2. BUAT TAGIHAN QRIS + KODE UNIK (KATALOG / BUNDLING / MYSTERY BOX)
       else if (data.startsWith("buy_")) {
         const qris = await getQris();
@@ -1216,8 +1408,8 @@ module.exports = async function handler(req, res) {
           `━━━━━━━━━━━━━━━━━━━━\n` +
           `💰 <b>TOTAL TRANSFER: <code>${formatRupiah(order.total_nominal)}</code></b>\n` +
           `━━━━━━━━━━━━━━━━━━━━\n\n` +
-          `⚠️ <b>PENTING:</b> Scan QRIS di atas dan transfer <b>TEPAT sampai digit terakhir</b> (<b>${formatRupiah(order.total_nominal)}</b>) agar admin dapat mengenali pembayaranmu.\n\n` +
-          `Setelah transfer berhasil, klik tombol <b>Konfirmasi Pembayaran</b> di bawah 👇`;
+          `⚠️ <b>PENTING:</b> Scan QRIS di atas dan transfer <b>TEPAT sampai digit terakhir</b> (<b>${formatRupiah(order.total_nominal)}</b>).\n\n` +
+          `⚡ <i>Link file akan otomatis dikirim dalam beberapa detik setelah transfer berhasil (atau klik Konfirmasi Pembayaran jika perlu bantuan admin).</i>`;
 
         await tgRequest(token, "sendPhoto", {
           chat_id: chatId,
@@ -1256,6 +1448,14 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: true });
         }
 
+        if (order.status === "acc") {
+          await tgRequest(token, "sendMessage", {
+            chat_id: chatId,
+            text: `✅ Pesanan #${order.id} sudah otomatis di-ACC! Cek pesan link di atas.`,
+          });
+          return res.status(200).json({ ok: true });
+        }
+
         if (order.status !== "pending") {
           return res.status(200).json({ ok: true });
         }
@@ -1267,10 +1467,10 @@ module.exports = async function handler(req, res) {
           chat_id: chatId,
           message_id: messageId,
           caption:
-            `⏳ <b>MENUNGGU VERIFIKASI ADMIN (Pesanan #${order.id})</b>\n\n` +
+            `⏳ <b>MENUNGGU VERIFIKASI (Pesanan #${order.id})</b>\n\n` +
             `📦 Paket: ${escapeHtml(order.item_nama)}\n` +
             `💰 Nominal: <b>${formatRupiah(order.total_nominal)}</b>\n\n` +
-            `Konfirmasi kamu sudah masuk ke antrean admin. Link file akan otomatis dikirim ke chat ini segera setelah mutasi terverifikasi!`,
+            `Konfirmasi kamu sudah tercatat. Link file akan otomatis dikirim ke chat ini segera setelah mutasi terverifikasi!`,
           parse_mode: "HTML",
         });
 
@@ -1286,7 +1486,7 @@ module.exports = async function handler(req, res) {
             `👤 <b>Pembeli:</b> ${escapeHtml(order.buyer_name)} (${escapeHtml(order.buyer_username)})\n` +
             `📦 <b>Paket:</b> ${escapeHtml(order.item_nama)}${voucherInfo}\n` +
             `💰 <b>Nominal Wajib Masuk:</b> <code>${formatRupiah(order.total_nominal)}</code>\n\n` +
-            `🔍 <i>Cek mutasi masuk sebesar <b>${formatRupiah(order.total_nominal)}</b> sebelum klik ACC.</i>`;
+            `🔍 <i>Cek mutasi masuk sebesar <b>${formatRupiah(order.total_nominal)}</b> (atau tunggu Auto-ACC).</i>`;
 
           await tgRequest(token, "sendMessage", {
             chat_id: qris.admin_chat_id,
@@ -1314,9 +1514,12 @@ module.exports = async function handler(req, res) {
       else if (data.startsWith("cancel_")) {
         const orderId = data.replace("cancel_", "");
         const order = await getOrder(orderId);
-        if (order && order.status === "pending") {
+        if (order && (order.status === "pending" || order.status === "waiting_acc")) {
           order.status = "cancelled";
-          await saveOrder(orderId, order);
+          await Promise.all([
+            saveOrder(orderId, order),
+            redisCommand(["DEL", `${REDIS_NOMINAL_PREFIX}${order.total_nominal}`]),
+          ]);
         }
         await tgRequest(token, "editMessageCaption", {
           chat_id: chatId,
@@ -1329,7 +1532,7 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      // 5. ADMIN KLIK ACC -> KIRIM LINK + KOLEKSI + BESTSELLER + LEADERBOARD + TESTIMONI CH
+      // 5. ADMIN KLIK ACC MANUAL -> PAKAI FUNGSI YANG SAMA DENGAN AUTO-ACC
       else if (data.startsWith("acc_")) {
         if (!isCallerAdmin) return res.status(200).json({ ok: true });
         const orderId = data.replace("acc_", "");
@@ -1339,94 +1542,7 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: true });
         }
 
-        order.status = "acc";
-        await saveOrder(orderId, order);
-
-        if (order.voucher_code) {
-          const vouchers = await getVouchers();
-          const v = vouchers[order.voucher_code];
-          if (v && v.quota > 0) {
-            v.quota = Math.max(0, v.quota - 1);
-            if (!Array.isArray(v.used_by)) v.used_by = [];
-            if (!v.used_by.includes(String(order.buyer_id))) {
-              v.used_by.push(String(order.buyer_id));
-            }
-            vouchers[order.voucher_code] = v;
-            await saveVouchers(vouchers);
-          }
-        }
-
-        const katalogList = await getKatalog();
-        let deliveredName = order.item_nama;
-        let deliveredLink = order.target_link;
-        let soldItemId = order.item_id || "";
-        let buyerText = "";
-
-        if (order.is_mystery) {
-          const bundle = await getBundle();
-          const pool = katalogList.map((k) => ({ id: String(k.id), nama: k.nama, link: k.link }));
-          if (bundle.link && bundle.link.trim() !== "") {
-            pool.push({ id: "", nama: "🌟 JACKPOT: Promo Bundling 2 Mini Set", link: bundle.link });
-          }
-          const won =
-            pool.length > 0
-              ? pool[Math.floor(Math.random() * pool.length)]
-              : { id: "", nama: "Paket Spesial Lumine", link: `https://t.me/${ADMIN_USERNAME}` };
-
-          soldItemId = won.id;
-          deliveredName = won.nama;
-          deliveredLink = normalizeUrl(won.link);
-
-          buyerText =
-            `🎲 <b>MYSTERY BOX TERBUKA! (Pesanan #${order.id})</b> 🎲\n\n` +
-            `Selamat! Kamu mendapatkan hadiah:\n` +
-            `🎁 <b>${escapeHtml(deliveredName)}</b>\n\n` +
-            `Berikut link akses hadiah kamu:\n` +
-            `🔗 ${escapeHtml(deliveredLink)}\n\n` +
-            `<i>Hadiah tersimpan di 🎒 Koleksi Saya & poin masuk ke Leaderboard!</i>`;
-        } else {
-          deliveredLink = normalizeUrl(order.target_link);
-          buyerText =
-            `🎉 <b>PEMBAYARAN DI-ACC! (Pesanan #${order.id})</b>\n\n` +
-            `Terima kasih telah membeli <b>${escapeHtml(deliveredName)}</b>!\n` +
-            `Berikut link akses file kamu:\n` +
-            `🔗 ${escapeHtml(deliveredLink)}\n\n` +
-            `<i>Link tersimpan otomatis di 🎒 Koleksi Saya & poin masuk ke Leaderboard!</i>`;
-        }
-
-        // Tambah hitungan terjual (Bestseller)
-        if (soldItemId || deliveredName) {
-          const targetIdx = katalogList.findIndex(
-            (k) => (soldItemId && String(k.id) === String(soldItemId)) || k.nama === deliveredName
-          );
-          if (targetIdx !== -1) {
-            katalogList[targetIdx].sold = (Number(katalogList[targetIdx].sold) || 0) + 1;
-            await saveKatalog(katalogList);
-          }
-        }
-
-        await Promise.all([
-          recordPurchaseToLeaderboard(order),
-          addKoleksi(order.buyer_id, deliveredName, deliveredLink),
-        ]);
-
-        const updatedAllCnt = await redisCommand(["HGET", REDIS_LB_ALLCNT_KEY, String(order.buyer_id)]);
-        await sendTestimonialToChannel(token, order, deliveredName, updatedAllCnt);
-
-        await tgRequest(token, "sendMessage", {
-          chat_id: order.buyer_id,
-          text: buyerText,
-          parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "📂 Buka Link File Sekarang", url: deliveredLink }],
-              [
-                { text: "🎒 Koleksi Saya", callback_data: "menu_koleksi" },
-                { text: "🏆 Leaderboard", callback_data: "menu_lb" },
-              ],
-            ],
-          },
-        });
+        const { deliveredName } = await processApproveOrder(token, order, "Manual Admin");
 
         const adminMysteryNote = order.is_mystery
           ? `\n🎲 <b>Hadiah Gacha Didapat:</b> ${escapeHtml(deliveredName)}`
@@ -1456,7 +1572,10 @@ module.exports = async function handler(req, res) {
         }
 
         order.status = "rejected";
-        await saveOrder(orderId, order);
+        await Promise.all([
+          saveOrder(orderId, order),
+          redisCommand(["DEL", `${REDIS_NOMINAL_PREFIX}${order.total_nominal}`]),
+        ]);
 
         await tgRequest(token, "sendMessage", {
           chat_id: order.buyer_id,
@@ -1499,51 +1618,22 @@ module.exports = async function handler(req, res) {
       const rawText = (msg.text || msg.caption || "").trim();
       const lowerText = rawText.toLowerCase();
 
-      // 0. ADMIN: /setsold (ATUR / RESET ANGKA TERJUAL BESTSELLER)
-      if (rawText.startsWith("/setsold")) {
+      // ADMIN: /autoacc (CEK URL WEBHOOK MACRODROID)
+      if (rawText.startsWith("/autoacc")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
-        const katalogList = await getKatalog();
-        if (katalogList.length === 0) {
-          await tgRequest(token, "sendMessage", { chat_id: chatId, text: "📂 Katalog masih kosong." });
-          return res.status(200).json({ ok: true });
-        }
-
-        const arg = rawText.replace(/^\/setsold\s*/i, "").trim();
-        if (!arg) {
-          let listText = "🔥 <b>DATA PENJUALAN SET (BESTSELLER)</b>\n\n";
-          katalogList.forEach((item, idx) => {
-            listText += `${idx + 1}. <b>${escapeHtml(item.nama)}</b> — Terjual: <b>${Number(item.sold) || 0}x</b>\n`;
-          });
-          listText +=
-            "\n<b>Ubah / Reset jumlah terjual:</b>\n" +
-            "<code>/setsold [nomor] [jumlah]</code>\n" +
-            "<i>Contoh: <code>/setsold 1 0</code> untuk reset ke 0</i>";
-          await tgRequest(token, "sendMessage", { chat_id: chatId, text: listText, parse_mode: "HTML" });
-          return res.status(200).json({ ok: true });
-        }
-
-        const parts = arg.split(/\s+/);
-        const idx = parseInt(parts[0], 10) - 1;
-        const newSold = parseInt(parts[1], 10);
-        if (isNaN(idx) || idx < 0 || idx >= katalogList.length || isNaN(newSold) || newSold < 0) {
-          await tgRequest(token, "sendMessage", {
-            chat_id: chatId,
-            text: "⚠️ Format salah! Contoh: <code>/setsold 1 0</code>",
-            parse_mode: "HTML",
-          });
-          return res.status(200).json({ ok: true });
-        }
-
-        katalogList[idx].sold = newSold;
-        await saveKatalog(katalogList);
+        const host = req.headers["x-forwarded-host"] || req.headers.host;
+        const autoAccUrl = `https://${host}/api/webhook?autoacc=${AUTOACC_SECRET}`;
         await tgRequest(token, "sendMessage", {
           chat_id: chatId,
-          text: `✅ Jumlah terjual <b>${escapeHtml(katalogList[idx].nama)}</b> diatur ke <b>${newSold}x</b>!`,
+          text:
+            "⚡ <b>KONFIGURASI AUTO-ACC MACRODROID</b>\n\n" +
+            `🔗 <b>URL Webhook (POST):</b>\n<code>${autoAccUrl}</code>\n\n` +
+            `📄 <b>Content-Type:</b> <code>application/json</code>\n` +
+            `📦 <b>Badan Konten:</b>\n<code>{"text": "[not_title] [notification]"}</code>`,
           parse_mode: "HTML",
         });
         return res.status(200).json({ ok: true });
       }
-
       // 1. ADMIN: /settesti
       if (rawText.startsWith("/settesti")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
@@ -1605,8 +1695,7 @@ module.exports = async function handler(req, res) {
           });
         }
         return res.status(200).json({ ok: true });
-      }
-
+              }
       // 2. ADMIN: /broadcast
       if (rawText.startsWith("/broadcast")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
@@ -1630,7 +1719,7 @@ module.exports = async function handler(req, res) {
         const photoId =
           msg.photo && msg.photo.length > 0
             ? msg.photo[msg.photo.length - 1].file_id
-              : "";
+            : "";
 
         let sentCount = 0;
         const batchSize = 20;
@@ -1674,8 +1763,7 @@ module.exports = async function handler(req, res) {
           parse_mode: "HTML",
         });
         return res.status(200).json({ ok: true });
-      }
-
+              }
       // 3. ADMIN: /buatvoucher & /hapusvoucher
       if (rawText.startsWith("/buatvoucher")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
@@ -1764,7 +1852,6 @@ module.exports = async function handler(req, res) {
         }
         return res.status(200).json({ ok: true });
       }
-
       // 4. USER: /voucher KODE
       if (rawText.startsWith("/voucher")) {
         const code = rawText.replace(/^\/voucher\s*/i, "").trim().toUpperCase();
@@ -1825,9 +1912,8 @@ module.exports = async function handler(req, res) {
           },
         });
         return res.status(200).json({ ok: true });
-      }
-
-      // 5. ADMIN: /setmystery
+            }
+                  // 5. ADMIN: /setmystery
       if (rawText.startsWith("/setmystery")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
         const arg = rawText.replace(/^\/setmystery\s*/i, "").trim().toLowerCase();
@@ -1898,8 +1984,9 @@ module.exports = async function handler(req, res) {
           parse_mode: "HTML",
         });
         return res.status(200).json({ ok: true });
-    }
-                                            // 7. ADMIN: /setbanner
+      }
+
+      // 7. ADMIN: /setbanner
       if (rawText.startsWith("/setbanner")) {
         if (!isAdmin) return res.status(200).json({ ok: true });
         const arg = rawText.replace(/^\/setbanner\s*/i, "").trim().toLowerCase();
@@ -2162,8 +2249,8 @@ module.exports = async function handler(req, res) {
           if (isAdmin) {
             headerText +=
               "\n\n🛠️ <b>Panel Admin Lengkap:</b>\n" +
-              "• <code>/setbanner</code> | <code>/setqris</code> | <code>/settesti</code> | <code>/broadcast</code>\n" +
-              "• <code>/buatvoucher KODE | DISKON | KUOTA</code>\n" +
+              "• <code>/setbanner</code> | <code>/setqris</code> | <code>/settesti</code> | <code>/autoacc</code>\n" +
+              "• <code>/broadcast</code> | <code>/buatvoucher KODE | DISKON | KUOTA</code>\n" +
               "• <code>/setmystery HARGA</code> | <code>/setsold</code> | <code>/resetlb</code>\n" +
               "• <code>/tambah</code> | <code>/edit</code> | <code>/hapus</code> | <code>/setbundle</code>";
           }
@@ -2256,4 +2343,4 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 };
-      
+            }
